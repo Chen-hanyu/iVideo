@@ -117,7 +117,7 @@ iVideo/
 
 ### 安装
 ```bash
-git clone <your-repo-url> iVideo
+git clone https://github.com/Chen-hanyu/iVideo.git
 cd iVideo
 npm install
 ```
