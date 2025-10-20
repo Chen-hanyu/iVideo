@@ -2,9 +2,8 @@
 
 基于 Vite + Vue 3 + TypeScript + Pinia 的本地视频剪辑与导出工具。支持多轨时间线、文本/贴图覆盖层、所见即所得编辑、工程保存/加载与 WebM 导出（画面 + 音轨混流）。
 
-### 图片展示（单列，引用根目录 picture/）
+### 图片展示
 
-> 将图片放到根目录的 `picture/` 文件夹后，按需修改以下文件名。
 
 ![项目全览](./picture/overview.png)
 ![时间线与播放头](./picture/timeline.png)
@@ -22,7 +21,7 @@
 
 ## 功能特性
 
-- 资产面板
+- 资源面板
   - 上传 视频/音频/贴图（图片），自动生成缩略图
   - 拖拽或双击将素材加入时间线
 - 时间线编辑
@@ -69,14 +68,14 @@ iVideo/
    ├─ config/
    │  └─ panels.ts            # 属性面板 schema（按类型配置字段/分组）
    │
-   ├─ core/                   # 核心业务模块（自研）
+   ├─ core/                   # 核心业务模块
    │  ├─ timeline.ts          # 时间线编辑器（拖动/裁剪/分割/撤销重做/缩放/入轨）
    │  ├─ preview.ts           # 预览渲染（视频 + 文本/贴图覆盖层 + 美化 + 播放）
    │  ├─ assets.ts            # 资产面板（上传/缩略图/拖拽/双击入轨，工程加载补卡）
    │  ├─ serialization.ts     # 工程保存/加载、导出 WebM（Canvas+WebAudio，含进度）
    │  └─ resizer.ts           # 分割条逻辑（左/右/时间线尺寸，双击复位）
    │
-   ├─ components/             # 视图组件（自研）
+   ├─ components/             # 视图组件
    │  ├─ Timeline/
    │  │  └─ Timeline.vue      # 时间线容器与控件（mounted 调用 core/timeline.init）
    │  └─ Panels/
@@ -160,45 +159,8 @@ npm run preview
 7) 导出视频
 - 顶部“导出”：选择分辨率（720p/1080p/自定义），生成 WebM 并下载
 
-## 部署与运行（多平台）
 
-### Windows / macOS / Linux（本地）
-```bash
-npm install
-npm run build
-npm run preview
-```
 
-- 亦可将 `dist/` 托管于任意静态服务器（Nginx/Apache/Netlify/Vercel 等）
-- Nginx 示例（简化）：
-```nginx
-server {
-  listen 80;
-  server_name your.domain.com;
-  root /var/www/ivideo/dist;
-  index index.html;
-  location / { try_files $uri $uri/ /index.html; }
-}
-```
-
-### Docker（可选）
-```Dockerfile
-FROM node:18-alpine AS build
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
-```
-```bash
-docker build -t ivideo .
-docker run -p 8080:80 ivideo
-# 打开 http://localhost:8080
-```
 
 ## 配置说明
 
