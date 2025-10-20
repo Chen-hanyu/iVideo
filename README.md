@@ -6,7 +6,6 @@
 
 
 ![项目全览](./picture/overview.png)
-![时间线与播放头](./picture/timeline.png)
 ![属性面板（配置化）](./picture/properties.png)
 ![覆盖层编辑（文本/贴图）](./picture/overlays.png)
 ![导出设置与进度](./picture/export.png)
