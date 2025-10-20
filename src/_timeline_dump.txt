@@ -1,0 +1,288 @@
+﻿import type { Clip } from '../types'
+import { useProjectStore } from '../store/project'
+import { useUIStore } from '../store/ui'
+
+// Frame-based timeline core (uses Pinia stores, renders DOM)
+type ClipEl = HTMLElement & { dataset: DOMStringMap }
+const rootDoc = document
+const uid = () => 'c_' + Math.random().toString(36).slice(2, 9)
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n))
+
+export function initTimeline(root: HTMLElement) {
+  const pj = useProjectStore()
+  const ui = useUIStore()
+
+  const content = root.querySelector('[data-role=content]') as HTMLElement
+  const scrollCont = root.querySelector('.scroll') as HTMLElement
+  const ruler = root.querySelector('[data-role=ruler]') as HTMLElement
+  const tracks = root.querySelector('[data-role=tracks]') as HTMLElement
+  const playhead = root.querySelector('[data-role=playhead]') as HTMLElement
+  const actions = root.querySelector('.timeline-actions') as HTMLElement
+  const zoomRange = root.querySelector('[data-role=zoom]') as HTMLInputElement
+  const trackHeightRange = root.querySelector('[data-role=track-height]') as HTMLInputElement
+
+  const state = { fps: pj.fps, durationFrames: pj.durationFrames, pxPerFrame: ui.pxPerFrame || parseInt(zoomRange?.value || '6', 10) }
+
+  let selectedClip: ClipEl | null = null
+
+  const framesToPx = (f: number)=> f * state.pxPerFrame
+  const pxToFrames = (px: number)=> Math.round(px / state.pxPerFrame)
+
+  function labelWidthPx(){
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--track-label-width').trim()
+    const n = parseInt(v || '140', 10)
+    return Number.isFinite(n) ? n : 140
+  }
+  function setContentWidth() {
+    const framesW = framesToPx(state.durationFrames)
+    const totalW = framesW + labelWidthPx()
+    ;(content.style as any).width = `${totalW}px`
+    ;(ruler.style as any).marginLeft = `${labelWidthPx()}px`
+    ;(ruler.style as any).width = `${framesW}px`
+  }
+
+  function updateRuler() {
+    ruler.innerHTML = ''
+    const frag = rootDoc.createDocumentFragment()
+    const fps = state.fps
+    const ppf = state.pxPerFrame
+    let minorStep = 1
+    if (ppf < 2) minorStep = fps
+    else if (ppf < 6) minorStep = 5
+    const majorStep = fps
+    for (let f=0; f<=state.durationFrames; f+=minorStep){
+      const x = framesToPx(f)
+      const tick = rootDoc.createElement('div')
+      const isMajor = f % majorStep === 0
+      tick.className = 'tick ' + (isMajor ? 'major' : 'minor')
+      ;(tick.style as any).left = `${x}px`
+      frag.appendChild(tick)
+      if (isMajor){
+        const s = Math.floor(f/fps)
+        const ff = f % fps
+        const m = Math.floor(s/60)
+        const ss = s % 60
+        const pad = (n:number,l=2)=> String(n).padStart(l,'0')
+        const label = rootDoc.createElement('div')
+        label.className = 'label'
+        ;(label.style as any).left = `${x}px`
+        label.textContent = `${pad(m)}:${pad(ss)}:${pad(ff)}`
+        frag.appendChild(label)
+      }
+    }
+    ruler.appendChild(frag)
+  }
+
+  function layoutClips() {
+    tracks.querySelectorAll<ClipEl>('.clip').forEach(el => {
+      const s = parseInt(el.dataset.start||'0',10)
+      const e = parseInt(el.dataset.end||'0',10)
+      ;(el.style as any).left = `${framesToPx(s)}px`
+      ;(el.style as any).width = `${Math.max(1, framesToPx(e-s))}px`
+    })
+  }
+
+  function positionPlayhead(fr: number){ fr=clamp(fr,0,state.durationFrames); (playhead.style as any).left=`${framesToPx(fr)}px`; (playhead as any).dataset.frame=String(fr); ui.setPlayhead(fr); window.dispatchEvent(new CustomEvent('ivideo-playhead-change', { detail: { frame: fr } })) }
+  function frameFromEvent(ev: MouseEvent){
+    const rect=content.getBoundingClientRect();
+    const viewX = ev.clientX - rect.left;
+    const x = viewX + (scrollCont?.scrollLeft || 0) - labelWidthPx();
+    const framesW = framesToPx(state.durationFrames)
+    return pxToFrames(clamp(x,0,framesW));
+  }
+
+  function rebuildFromStore(){
+    tracks.innerHTML=''
+    pj.tracks.forEach(t=>{
+      const tr = rootDoc.createElement('div')
+      tr.className = `track ${t.type}`
+      tr.setAttribute('data-track-id', t.id)
+      tr.innerHTML = `<div class="track-label"><span class=\"name\">${mapName(t.type)}</span><span class=\"track-ctrls\"><button class=\"trk-btn\" data-cmd=\"up\">鈫?/button><button class=\"trk-btn\" data-cmd=\"down\">鈫?/button><button class=\"trk-btn\" data-cmd=\"delete\">鉁?/button></span></div><div class=\"lane\"></div>`
+      tracks.appendChild(tr)
+      const lane = tr.querySelector('.lane') as HTMLElement
+      t.clips.forEach(c=> lane.appendChild(createClipElFromData(c)))
+    })
+    attachHandlers(); layoutClips(); clearSelection()
+  }
+
+  function clearSelection(){ if(selectedClip) selectedClip.classList.remove('selected'); selectedClip=null; updateActionsUI(); ui.setSelectedClip(null) }
+  function selectClip(el: ClipEl | null){ if(selectedClip===el) return; if(selectedClip) selectedClip.classList.remove('selected'); selectedClip=el; if(selectedClip) selectedClip.classList.add('selected'); updateActionsUI(); ui.setSelectedClip(selectedClip?.dataset.id || null) }
+  function updateActionsUI(){ const bS=actions.querySelector('[data-action="split"]') as HTMLButtonElement; const bD=actions.querySelector('[data-action="delete"]') as HTMLButtonElement; if(bS) bS.disabled=!selectedClip; if(bD) bD.disabled=!selectedClip }
+
+  function splitAtPlayhead(){ if(!selectedClip) return; const fr=parseInt((playhead as any).dataset.frame||'0',10); const s=parseInt(selectedClip.dataset.start!,10); const e=parseInt(selectedClip.dataset.end!,10); if(fr<=s+1||fr>=e-1) return; pj.pushHistory(); selectedClip.dataset.end=String(fr); const right=selectedClip.cloneNode(true) as ClipEl; right.dataset.start=String(fr); const trackEl=selectedClip.closest('.track') as HTMLElement; const tid=trackEl?.getAttribute('data-track-id')||''; const tr=pj.tracks.find(t=>t.id===tid); const id=selectedClip.dataset.id||uid(); if(tr){ const idx=tr.clips.findIndex(c=>c.id===id); if(idx>=0){ tr.clips[idx].end=fr; const clone: Clip = JSON.parse(JSON.stringify(tr.clips[idx])); clone.id=uid(); clone.start=fr; tr.clips.splice(idx+1,0,clone); right.dataset.id=clone.id } }
+    selectedClip.parentElement!.insertBefore(right, selectedClip.nextSibling); attachClipHandlers(right); layoutClips(); selectClip(right) }
+  function deleteSelected(){ if(!selectedClip) return; pj.pushHistory(); const id=selectedClip.dataset.id||''; pj.tracks.forEach(t=>{ const i=t.clips.findIndex(c=>c.id===id); if(i>=0) t.clips.splice(i,1) }); const next=selectedClip.nextElementSibling as ClipEl || selectedClip.previousElementSibling as ClipEl; selectedClip.remove(); selectClip(next?.classList?.contains('clip')?next:null) }
+
+  // snapping helpers
+  const SNAP_PX = 8
+  function getSnapTargets(exclude?: ClipEl){
+    const targets:number[]=[]
+    const startF=Math.max(0, Math.floor(pxToFrames(scrollCont.scrollLeft)/state.fps)*state.fps)
+    const endF=Math.min(state.durationFrames, Math.ceil(pxToFrames(scrollCont.scrollLeft + scrollCont.clientWidth)/state.fps)*state.fps)
+    for(let f=startF; f<=endF; f+=state.fps) targets.push(framesToPx(f))
+    const ph=parseInt(((playhead as any).dataset.frame)||'0',10); targets.push(framesToPx(ph))
+    tracks.querySelectorAll<ClipEl>('.clip').forEach(c=>{ if(c===exclude) return; const s=parseInt(c.dataset.start||'0',10); const e=parseInt(c.dataset.end||'0',10); targets.push(framesToPx(s), framesToPx(e)) })
+    targets.sort((a,b)=>a-b); return targets
+  }
+  const snapPx=(x:number,t:number[])=>{ let best=x,d=SNAP_PX+1; for(const v of t){ const dv=Math.abs(v-x); if(dv<d && dv<=SNAP_PX){ d=dv; best=v } } return best }
+
+  // handlers
+  function attachClipHandlers(el: ClipEl){
+    el.addEventListener('mousedown', (e)=>{ if((e.target as HTMLElement).classList.contains('handle')) return; selectClip(el); startDragMove(e, el); e.stopPropagation() })
+    el.querySelectorAll('.handle').forEach(h=> h.addEventListener('mousedown', (e)=>{ const side=(e.target as HTMLElement).getAttribute('data-side')||'l'; selectClip(el); startTrim(e as MouseEvent, el, side as 'l'|'r'); e.stopPropagation() }))
+  }
+  function attachHandlers(){ tracks.querySelectorAll<ClipEl>('.clip').forEach(attachClipHandlers); tracks.querySelectorAll<HTMLElement>('.track').forEach(attachTrackHandlers) }
+
+  function startDragMove(e: MouseEvent, el: ClipEl){
+    const startX=e.clientX; const s0=parseInt(el.dataset.start||'0',10); const len=parseInt(el.dataset.end||'0',10)-s0
+    const targets=getSnapTargets(el)
+    function onMove(ev: MouseEvent){ const dx=ev.clientX-startX; let ns=clamp(s0+pxToFrames(dx),0,state.durationFrames-len); ns=pxToFrames(snapPx(framesToPx(ns), targets)); el.dataset.start=String(ns); el.dataset.end=String(ns+len);
+      // cross-track move
+      const y=ev.clientY; const lanes=[...tracks.querySelectorAll('.lane')] as HTMLElement[]; const dest=lanes.find(la=>{ const r=la.getBoundingClientRect(); return y>=r.top && y<=r.bottom })
+      if(dest && dest!==el.parentElement) dest.appendChild(el)
+      layoutClips() }
+    function onUp(){ rootDoc.removeEventListener('mousemove',onMove); const clipId=el.dataset.id||''; const start=parseInt(el.dataset.start||'0',10); const end=parseInt(el.dataset.end||'0',10); const trackEl=el.closest('.track') as HTMLElement; const trackId=trackEl?.getAttribute('data-track-id')||''; pj.pushHistory(); let handled=false; pj.tracks.forEach(t=>{ const i=t.clips.findIndex(c=>c.id===clipId); if(i>=0){ if(t.id!==trackId){ const c=t.clips.splice(i,1)[0]; c.start=start; c.end=end; const dest=pj.tracks.find(tt=>tt.id===trackId); dest?.clips.push(c) } else { t.clips[i].start=start; t.clips[i].end=end } handled=true } }); if(!handled && trackId){ const tr=pj.tracks.find(t=>t.id===trackId); tr?.clips.push({ id: clipId||uid(), type: (el.dataset.type as any)||'video', start, end, data: { ...el.dataset } as any }) } }
+    rootDoc.addEventListener('mousemove',onMove); rootDoc.addEventListener('mouseup',onUp, { once: true })
+  }
+  function startTrim(e: MouseEvent, el: ClipEl, side: 'l'|'r'){
+    const startX=e.clientX; let s=parseInt(el.dataset.start||'0',10); let ee=parseInt(el.dataset.end||'0',10)
+    const targets=getSnapTargets(el)
+    function onMove(ev: MouseEvent){ const dx=ev.clientX-startX; const df=pxToFrames(dx); if(side==='l'){ let ns=clamp(s+df,0,ee-1); ns=pxToFrames(snapPx(framesToPx(ns), targets)); el.dataset.start=String(ns) } else { let ne=clamp(ee+df, s+1, state.durationFrames); ne=pxToFrames(snapPx(framesToPx(ne), targets)); el.dataset.end=String(ne) } layoutClips() }
+    function onUp(){ rootDoc.removeEventListener('mousemove',onMove); pj.pushHistory(); const clipId=el.dataset.id||''; const start=parseInt(el.dataset.start||'0',10); const end=parseInt(el.dataset.end||'0',10); pj.tracks.forEach(t=>{ const i=t.clips.findIndex(c=>c.id===clipId); if(i>=0){ t.clips[i].start=start; t.clips[i].end=end } }) }
+    rootDoc.addEventListener('mousemove',onMove); rootDoc.addEventListener('mouseup',onUp, { once: true })
+  }
+
+  function attachTrackHandlers(track: HTMLElement){
+    const ctrls=track.querySelector('.track-ctrls'); if(!ctrls) return;
+    ctrls.addEventListener('click', (ev)=>{
+      const btn=(ev.target as HTMLElement).closest('.trk-btn') as HTMLElement; if(!btn) return;
+      const cmd=btn.getAttribute('data-cmd'); const trackId=track.getAttribute('data-track-id')||''; const t=pj.tracks.find(T=>T.id===trackId); if(!t) return;
+      if(cmd==='delete'){
+        pj.pushHistory(); track.remove(); const idx=pj.tracks.findIndex(T=>T.id===trackId); if(idx>=0) pj.tracks.splice(idx,1)
+      } else if(cmd==='up'){
+        const prev=track.previousElementSibling; if(prev){ pj.pushHistory(); track.parentElement!.insertBefore(track, prev); const idx=pj.tracks.findIndex(T=>T.id===trackId); if(idx>0){ const [T]=pj.tracks.splice(idx,1); pj.tracks.splice(idx-1,0,T) } }
+      } else if(cmd==='down'){
+        const next=track.nextElementSibling; if(next){ pj.pushHistory(); track.parentElement!.insertBefore(next, track); const idx=pj.tracks.findIndex(T=>T.id===trackId); if(idx>=0 && idx<pj.tracks.length-1){ const [T]=pj.tracks.splice(idx,1); pj.tracks.splice(idx+1,0,T) } }
+      } else if(cmd==='lock'){
+        t.locked = !t.locked; track.setAttribute('data-locked', String(!!t.locked))
+      } else if(cmd==='hide'){
+        t.hidden = !t.hidden; track.setAttribute('data-hidden', String(!!t.hidden))
+      } else if(cmd==='solo'){
+        t.solo = !t.solo
+      }
+    })
+  }
+  const mapName=(type:string)=>({video:'瑙嗛',audio:'闊抽',text:'鏂囨湰',sticker:'璐村浘'} as any)[type]||'杞ㄩ亾'
+  function addTrack(type: string){
+    const trData = pj.addTrack(type as any)!;
+    const tr=rootDoc.createElement('div');
+    tr.className=`track ${type}`; tr.setAttribute('data-track-id', trData.id);
+    tr.innerHTML=`<div class="track-label"><span class="name">${mapName(type)}</span><span class="track-ctrls"><button class="trk-btn state" data-cmd="lock">馃敀</button><button class="trk-btn state" data-cmd="hide">馃憗</button><button class="trk-btn state" data-cmd="solo">S</button><span class="sep" style="height:14px"></span><button class="trk-btn" data-cmd="up">鈫?/button><button class="trk-btn" data-cmd="down">鈫?/button><button class="trk-btn" data-cmd="delete">鉁?/button></span></div><div class="lane"></div>`;
+    if (trData.locked) tr.setAttribute('data-locked','true'); if (trData.hidden) tr.setAttribute('data-hidden','true');
+    tracks.appendChild(tr); attachTrackHandlers(tr as HTMLElement)
+  }
+  function createClipElFromData(c: Clip){ const el=rootDoc.createElement('div'); el.className=`clip clip-${c.type}`; el.dataset.type=c.type as any; el.dataset.start=String(c.start); el.dataset.end=String(c.end); el.dataset.id=c.id; Object.entries(c.data||{}).forEach(([k,v])=>{ if(['start','end','type','id'].includes(k)) return; (el.dataset as any)[k]=v as any }); el.textContent=(c.type==='text' ? (c.data?.content||'鏂囧瓧') : (c.label||c.source||c.type)) + ' '; el.innerHTML += '<i class="handle l" data-side="l"></i><i class="handle r" data-side="r"></i>'; attachClipHandlers(el as ClipEl); return el as ClipEl }
+
+  // Initialize
+  if (pj.tracks.length === 0) {
+    tracks.querySelectorAll('.track').forEach(trEl=>{
+      const type = [...(trEl as HTMLElement).classList].find(c=>['video','audio','text','sticker'].includes(c)) || 'video'
+      const t = pj.addTrack(type as any)!
+      ;(trEl as HTMLElement).setAttribute('data-track-id', t.id)
+      ;(trEl as HTMLElement).querySelectorAll('.clip').forEach(clEl=>{
+        const ce = clEl as ClipEl
+        const c: Clip = { id: uid(), type: (ce.dataset.type as any)||'video', start: parseInt(ce.dataset.start||'0',10), end: parseInt(ce.dataset.end||'0',10), data: { ...ce.dataset } as any }
+        if (c.data) { delete (c.data as any).id }
+        t.clips.push(c); ce.dataset.id = c.id
+      })
+    })
+  } else {
+    rebuildFromStore()
+  }
+
+  setContentWidth(); updateRuler(); layoutClips(); attachHandlers(); positionPlayhead(ui.playhead || 0)
+
+  // Interactions
+  let draggingHead = false
+  content.addEventListener('mousedown', (ev)=>{ const el=ev.target as HTMLElement; const isHead = el.classList.contains('ruler') || el.classList.contains('tick') || el.classList.contains('label') || el.closest('.playhead')
+    if((ev.target as HTMLElement).closest('.clip')) return
+    if (isHead) { draggingHead = true; positionPlayhead(frameFromEvent(ev as MouseEvent)); ev.preventDefault() }
+    else { positionPlayhead(frameFromEvent(ev as MouseEvent)); clearSelection() }
+  })
+  window.addEventListener('mousemove', (ev)=>{ if(!draggingHead) return; positionPlayhead(frameFromEvent(ev as MouseEvent)) })
+  window.addEventListener('mouseup', ()=>{ draggingHead=false })
+
+  // drag by grabbing the playhead knob
+  playhead.addEventListener('mousedown', (ev)=>{ draggingHead=true; ev.preventDefault() })
+  actions.addEventListener('click', (ev)=>{ const btn=(ev.target as HTMLElement).closest('[data-action]') as HTMLElement; if(!btn) return; const act=btn.getAttribute('data-action'); if(act==='split') splitAtPlayhead(); else if(act==='delete') deleteSelected(); else if(act==='undo') pj.undo(), rebuildFromStore(); else if(act==='redo') pj.redo(), rebuildFromStore(); else if(act==='add-track') addTrack((btn as any).dataset.type) })
+  zoomRange?.addEventListener('input', ()=>{ state.pxPerFrame=parseInt(zoomRange.value,10)||state.pxPerFrame; ui.setPxPerFrame(state.pxPerFrame); setContentWidth(); updateRuler(); layoutClips(); positionPlayhead(parseInt((playhead as any).dataset.frame||'0',10)) })
+  trackHeightRange?.addEventListener('input', ()=>{ document.documentElement.style.setProperty('--track-height', trackHeightRange.value+'px'); ui.setTrackHeight(parseInt(trackHeightRange.value,10)) })
+  window.addEventListener('keydown', (ev)=>{ const mod=(ev as KeyboardEvent).ctrlKey|| (ev as KeyboardEvent).metaKey; const ke=(ev as KeyboardEvent); if(ke.key.toLowerCase()==='s'){ splitAtPlayhead(); ev.preventDefault() } else if(ke.key==='Delete'||ke.key==='Backspace'){ deleteSelected(); ev.preventDefault() } else if(mod && ke.key.toLowerCase()==='z' && !ke.shiftKey){ pj.undo(); rebuildFromStore(); ev.preventDefault() } else if((mod && ke.key.toLowerCase()==='y') || (mod && ke.key.toLowerCase()==='z' && ke.shiftKey)){ pj.redo(); rebuildFromStore(); ev.preventDefault() } else if(mod && (ke.key==='='||ke.key==='+')){ zoomRange.value=String(Math.min(parseInt(zoomRange.value,10)+1, parseInt(zoomRange.max,10))); zoomRange.dispatchEvent(new Event('input')) } else if(mod && (ke.key==='-'||ke.key==='_')){ zoomRange.value=String(Math.max(parseInt(zoomRange.value,10)-1, parseInt(zoomRange.min,10))); zoomRange.dispatchEvent(new Event('input')) } else if(selectedClip && (ke.key==='ArrowLeft'||ke.key==='ArrowRight')){ const step= ke.shiftKey?10:1; const dir= ke.key==='ArrowLeft'?-1:1; const s=parseInt(selectedClip.dataset.start||'0',10); const e=parseInt(selectedClip.dataset.end||'0',10); const len=e-s; let ns= clamp(s + dir*step, 0, state.durationFrames - len); selectedClip.dataset.start=String(ns); selectedClip.dataset.end=String(ns+len); layoutClips(); ev.preventDefault() } })
+
+  // Listen for property updates to reflect on DOM quickly
+  window.addEventListener('ivideo-update-clip' as any, (e: any)=>{
+    const { id, key, value } = e.detail || {}
+    const el = tracks.querySelector(`.clip[data-id="${id}"]`) as ClipEl | null
+    if (!el) return
+    ;(el.dataset as any)[key] = value
+    if (key === 'opacity') (el.style as any).opacity = value
+    if (key === 'content' && el.dataset.type === 'text') {
+      const firstNode = el.firstChild
+      if (firstNode && firstNode.nodeType === 3) (firstNode as any).nodeValue = String(value) + ' '
+    }
+  })
+
+  // external rebuild trigger (e.g., after load)
+  window.addEventListener('ivideo-rebuild' as any, ()=>{ rebuildFromStore(); setContentWidth(); updateRuler(); layoutClips(); positionPlayhead(ui.playhead||0) })
+
+  // Accept external requests to add clip (from assets panel)
+  window.addEventListener('ivideo-add-clip' as any, (e: any)=>{
+    const { trackId, type, start, duration, label, source } = e.detail || {}
+    if (!trackId || !type) return
+    let end = (start||0) + (duration|| (5*state.fps))
+    const c: Clip = { id: uid(), type, start, end, data: { source, label } as any, label }
+    const tr = pj.tracks.find(t=>t.id===trackId)
+    if (!tr) return
+    tr.clips.push(c)
+    const lane = tracks.querySelector(`.track[data-track-id="${trackId}"] .lane`) as HTMLElement
+    if (lane) lane.appendChild(createClipElFromData(c))
+    // auto-extend project duration
+    if (end > state.durationFrames) {
+      pj.durationFrames = end
+      state.durationFrames = end
+      setContentWidth(); updateRuler()
+    }
+    layoutClips()
+    window.dispatchEvent(new Event('ivideo-rebuild'))
+  })
+
+  // Enable drop from assets into lanes
+  tracks.querySelectorAll('.lane').forEach((lane)=>{
+    lane.addEventListener('dragover', (ev)=>{
+      if (ev.dataTransfer?.types.includes('application/ivideo-asset')) ev.preventDefault()
+    })
+    lane.addEventListener('drop', (ev:any)=>{
+      const json = ev.dataTransfer?.getData('application/ivideo-asset')
+      if (!json) return
+      ev.preventDefault()
+      try {
+        const asset = JSON.parse(json)
+        const trackEl = (ev.currentTarget as HTMLElement).closest('.track') as HTMLElement
+        const trackId = trackEl?.getAttribute('data-track-id')
+        if (!trackId) return
+        const rect = (content as HTMLElement).getBoundingClientRect()
+        const xView = Math.max(0, Math.min(rect.width, ev.clientX - rect.left))
+        const x = xView + (scrollCont?.scrollLeft || 0) - labelWidthPx()
+        const start = Math.max(0, Math.round(x / (ui.pxPerFrame || 6)))
+        window.dispatchEvent(new CustomEvent('ivideo-add-clip', { detail: { trackId, type: asset.type, start, duration: asset.durationFrames, label: asset.label, source: asset.url } }))
+      } catch {}
+    })
+  })
+
+  // Allow external control of playhead (e.g., player)
+  window.addEventListener('ivideo-set-playhead' as any, (e: any)=>{
+    const fr = Math.round(Number((e.detail||{}).frame) || 0)
+    positionPlayhead(fr)
+  })
+}
+
